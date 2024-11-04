@@ -1,314 +1,117 @@
-package godis
+package main
 
 import (
 	"fmt"
-	"time"
+	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
+// Model represents the state of the application
 type Model struct {
-	selectedX int
-	selectedY int
-	calData   []CalDataPoint
-	viewData  [52][7]viewDataPoint // Hardcoded to one year for now
-	// focus     bool // TODO
+	disassembly1 string
+	disassembly2 string
+	cursorY1     int
+	cursorY2     int
+	width        int
+	height       int
+	viewport     viewport.Model
 }
 
-var scaleColors = []string{
-	// Light Theme
-	// #ebedf0 - Less
-	// #9be9a8
-	// #40c463
-	// #30a14e
-	// #216e39 - More
-
-	// Dark Theme
-	"#161b22", // Less
-	"#0e4429",
-	"#006d32",
-	"#26a641",
-	"#39d353", // - More
-
-}
-
-type CalDataPoint struct {
-	Date  time.Time
-	Value float64
-}
-
-func (m *Model) addCalData(date time.Time, val float64) {
-	// Create new cal data point and add to cal data
-	newPoint := CalDataPoint{date, val}
-	m.calData = append(m.calData, newPoint)
-}
-
-func getIndexDate(x int, y int) time.Time {
-	// compare the x,y to today and subtract
-	today := time.Now()
-	todayX, todayY := getDateIndex(today)
-
-	diffX := todayX - x
-	diffY := todayY - y
-
-	diffDays := diffX*7 + diffY
-
-	targetDate := today.AddDate(0, 0, -diffDays)
-	return targetDate
-}
-
-func weeksAgo(date time.Time) int {
-	today := truncateToDate(time.Now())
-	thisWeek := today.AddDate(0, 0, -int(today.Weekday())) // Most recent Sunday
-
-	compareDate := truncateToDate(date)
-	compareWeek := compareDate.AddDate(0, 0, -int(compareDate.Weekday()))
-
-	result := thisWeek.Sub(compareWeek).Hours() / 24 / 7
-	return int(result)
-}
-
-func truncateToDate(t time.Time) time.Time {
-	return time.Date(t.Local().Year(), t.Local().Month(), t.Local().Day(), 0, 0, 0, 0, t.Local().Location())
-}
-
-func getDateIndex(date time.Time) (int, int) {
-	// Max index - number of weeks ago
-	x := 51 - weeksAgo(date)
-
-	y := int(date.Local().Weekday())
-
-	return x, y
-}
-
-func parseCalToView(calData []CalDataPoint) [52][7]viewDataPoint {
-	var viewData [52][7]viewDataPoint
-
-	for _, v := range calData {
-		x, y := getDateIndex(v.Date)
-		// Check if in range
-		// TODO: un-hardcode the X limit
-		if x > -1 && y > -1 &&
-			x < 52 && y < 7 {
-			viewData[x][y].actual += v.Value
-		}
-	}
-	viewData = normalizeViewData(viewData)
-	return viewData
-}
-
-func normalizeViewData(data [52][7]viewDataPoint) [52][7]viewDataPoint {
-	var min float64
-	var max float64
-
-	// Find min/max
-	min = data[0][0].actual
-	max = data[0][0].actual
-
-	for _, row := range data {
-		for _, val := range row {
-
-			if val.actual < min {
-				min = val.actual
-			}
-			if val.actual > max {
-				max = val.actual
-			}
-		}
-	}
-
-	// Normalize the data
-	for i, row := range data {
-		for j, val := range row {
-			data[i][j].normalized = (val.actual - min) / (max - min)
-		}
-	}
-	return data
-}
-
-type viewDataPoint struct {
-	actual     float64
-	normalized float64
-}
-
-func getScaleColor(value float64) string {
-	const numColors = 5
-	// Assume it's normalized between 0.0-1.0
-	const max = 1.0
-	// const min = 0.0
-
-	return scaleColors[int((value/max)*(numColors-1))]
-}
-
+// Init initializes the model
 func (m Model) Init() tea.Cmd {
+	m.viewport = viewport.New(m.width, m.height-4)
 	return nil
 }
 
-// Create a new model with default settings.
-func New(data []CalDataPoint) Model {
-	todayX, todayY := getDateIndex(time.Now())
-
-	parsedData := parseCalToView(data)
-	return Model{
-		selectedX: todayX,
-		selectedY: todayY,
-		calData:   data,
-		viewData:  parsedData,
-		// focus:     false, // TODO
-	}
-}
-
-// func (m *Model) Focus() tea.Cmd { // TODO
-// m.focus = true
-// return m.Cursor.Focus()
-// }
-
-func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	// TODO: ignore if not focused
-	// if !m.focus { return m, nil }
-
+// Update handles messages and updates the model
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "up", "k":
-			if m.selectedY > 0 {
-				m.selectedY--
-			} else if m.selectedY == 0 && m.selectedX > 0 {
-				// Scroll to the end of the previous week if on Sunday
-				// and not at the beginning of the calendar.
-				m.selectedY = 6
-				m.selectedX--
+		case "j":
+			if m.cursorY1 < len(strings.Split(m.disassembly1, "\n"))-1 {
+				m.cursorY1++
 			}
-
-		case "down", "j":
-			// Don't allow user to scroll beyond today
-			if m.selectedY < 6 &&
-				(m.selectedX != 51 ||
-					m.selectedY < int(time.Now().Weekday())) {
-				m.selectedY++
-			} else if m.selectedY == 6 && m.selectedX != 51 {
-				// Scroll to the beginning of next week if on Saturday
-				// and not at the end of the calendar.
-				m.selectedY = 0
-				m.selectedX++
+		case "k":
+			if m.cursorY1 > 0 {
+				m.cursorY1--
 			}
-		case "right", "l":
-			// Don't allow users to scroll beyond today from the previous column
-			if m.selectedX < 50 ||
-				(m.selectedX == 50 &&
-					m.selectedY <= int(time.Now().Weekday())) {
-				m.selectedX++
+		case "tab":
+			if m.cursorY2 < len(strings.Split(m.disassembly2, "\n"))-1 {
+				m.cursorY2++
 			}
-		case "left", "h":
-			if m.selectedX > 0 {
-				m.selectedX--
+		case "shift+tab":
+			if m.cursorY2 > 0 {
+				m.cursorY2--
 			}
-		case "enter", " ":
-			// Hard coded to add a new entry with value `1.0`
-			m.addCalData(
-				getIndexDate(m.selectedX, m.selectedY),
-
-				1.0)
-			m.viewData = parseCalToView(m.calData)
-
+		case "q":
+			return m, tea.Quit
 		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.viewport.Width = m.width
+		m.viewport.Height = m.height - 4
 	}
 	return m, nil
 }
 
+// View renders the model
 func (m Model) View() string {
-	// The header
+	dmp := diffmatchpatch.New()
+	diffs := dmp.DiffMain(m.disassembly1, m.disassembly2, false)
 
-	theTime := getIndexDate(m.selectedX, m.selectedY) // time.Now()
+	var leftColumn, rightColumn strings.Builder
+	equalStyle := lipgloss.NewStyle()
+	deleteStyle := lipgloss.NewStyle().Background(lipgloss.Color("9"))  // Red background
+	insertStyle := lipgloss.NewStyle().Background(lipgloss.Color("10")) // Green background
 
-	title, _ := glamour.Render(theTime.Format("# Monday, January 02, 2006"), "dark")
-	s := title
-
-	selectedDetail := "    Value: " +
-		fmt.Sprint(m.viewData[m.selectedX][m.selectedY].actual) +
-		" normalized: " +
-		fmt.Sprint(m.viewData[m.selectedX][m.selectedY].normalized) +
-		"\n\n"
-
-	s += selectedDetail
-
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-
-	boxStyle := lipgloss.NewStyle().
-		PaddingRight(1).
-		Foreground(lipgloss.Color(scaleColors[2]))
-
-	boxSelectedStyle := boxStyle.Copy().
-		Background(lipgloss.Color("#9999ff")).
-		Foreground(lipgloss.Color(scaleColors[0]))
-
-	// Month Labels
-	var currMonth time.Month
-	s += "  "
-	for j := 0; j < 52; j++ {
-		// Check the last day of the week for that column
-		jMonth := getIndexDate(j, 6).Month()
-
-		if currMonth != jMonth {
-			currMonth = jMonth
-			s += labelStyle.Render(getIndexDate(j, 6).Format("Jan") + " ")
-
-			// Skip the length of the label we just added
-			j += 1
-		} else {
-			s += "  "
+	for _, diff := range diffs {
+		switch diff.Type {
+		case diffmatchpatch.DiffEqual:
+			leftColumn.WriteString(equalStyle.Render(diff.Text))
+			rightColumn.WriteString(equalStyle.Render(diff.Text))
+		case diffmatchpatch.DiffDelete:
+			leftColumn.WriteString(deleteStyle.Render(diff.Text))
+		case diffmatchpatch.DiffInsert:
+			rightColumn.WriteString(insertStyle.Render(diff.Text))
 		}
 	}
-	s += "\n"
 
-	for j := 0; j < 7; j++ {
-		// Add day of week labels
-		switch j {
-		case 0:
-			s += labelStyle.Render("S ")
-		case 1:
-			s += labelStyle.Render("M ")
-		case 2:
-			s += labelStyle.Render("T ")
-		case 3:
-			s += labelStyle.Render("W ")
-		case 4:
-			s += labelStyle.Render("T ")
-		case 5:
-			s += labelStyle.Render("F ")
-		case 6:
-			s += labelStyle.Render("S ")
-		}
+	halfWidth := m.width / 2
+	leftStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Width(halfWidth - 2).Height(m.viewport.Height)
+	rightStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Width(halfWidth - 2).Height(m.viewport.Height)
 
-		// Add calendar days
-		for i := 0; i < 52; i++ {
-			// Selected Item
-			if m.selectedX == i && m.selectedY == j {
-				s += boxSelectedStyle.Copy().Foreground(
-					lipgloss.Color(
-						getScaleColor(
-							m.viewData[i][j].normalized))).
-					Render("■")
-			} else if i == 51 &&
-				j > int(time.Now().Weekday()) {
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Border(lipgloss.NormalBorder()).
+		Align(lipgloss.Center).
+		Width(halfWidth).
+		MarginLeft((m.width - halfWidth) / 2).
+		Render("Godis")
 
-				// In the future
-				s += boxStyle.Render(" ")
-			} else {
+	content := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(leftColumn.String()), rightStyle.Render(rightColumn.String()))
+	m.viewport.SetContent(content)
+	m.viewport.GotoBottom() // Scroll to the bottom
 
-				// Not Selected Item and not in the future
-				s += boxStyle.Copy().
-					Foreground(
-						lipgloss.Color(
-							getScaleColor(
-								m.viewData[i][j].normalized))).
-					Render("■")
-			}
-		}
-		s += "\n"
+	return lipgloss.JoinVertical(lipgloss.Top, header, m.viewport.View())
+}
+
+func main() {
+	disassembly1 := "push ebp\nmov ebp, esp\nsub esp, 0x10\nmov eax, 0x2\nmov ebx, 0x1\nadd eax, ebx\nmov [ebp-0x4], eax\nmov esp, ebp\npop ebp\nret"
+	disassembly2 := "push ebp\nmov ebp, esp\nsub esp, 0x10\nmov eax, 0x5\nmov ebx, 0x3\nadd eax, ebx\nmov [ebp-0x4], eax\nmov esp, ebp\npop ebp\n"
+
+	model := Model{
+		disassembly1: disassembly1,
+		disassembly2: disassembly2,
 	}
 
-	return s
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
 }
